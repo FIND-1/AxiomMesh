@@ -21,6 +21,13 @@ from .config import (
     TITLE_MODEL,
     ModelConfig,
 )
+from .llm.contracts import LLMRequest, LLMResponse
+from .llm.gateway import LLMGateway
+from .llm.providers.deepseek import DeepSeekProvider
+from .llm.providers.gemini import GeminiProvider
+from .llm.providers.kimi import KimiProvider
+from .llm.providers.qwen import QwenProvider
+
 
 
 def resolve_model(model: ModelConfig | str) -> ModelConfig:
@@ -115,94 +122,28 @@ async def _query_deepseek(
         print("DEEPSEEK_API_KEY is not configured.")
         return None
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model.api_model,
-        "messages": messages,
-    }
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(DEEPSEEK_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-
-    data = response.json()
-    message = data["choices"][0]["message"]
-    return {
-        "content": message.get("content"),
-        "reasoning_details": message.get("reasoning_content"),
-    }
-
-
-async def _query_openai_compatible_chat(
-    *,
-    api_key: Optional[str],
-    api_url: str,
-    api_key_label: str,
-    model: ModelConfig,
-    messages: List[Dict[str, str]],
-    timeout: float,
-) -> Optional[Dict[str, Any]]:
-    """Query an OpenAI-compatible chat completions endpoint."""
-    if not api_key:
-        print(f"{api_key_label} is not configured.")
-        return None
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model.api_model,
-        "messages": messages,
-    }
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(api_url, headers=headers, json=payload)
-        response.raise_for_status()
-
-    data = response.json()
-    message = data["choices"][0]["message"]
-    return {
-        "content": message.get("content"),
-        "reasoning_details": message.get("reasoning_content"),
-    }
-
-
-def _messages_to_gemini_contents(
-    messages: List[Dict[str, str]],
-) -> List[Dict[str, Any]]:
-    """Convert chat-style messages into Gemini contents."""
-    role_map = {
-        "assistant": "model",
-        "model": "model",
-        "system": "user",
-        "user": "user",
-    }
-    return [
+    request = LLMRequest(
+        model=model.api_model,
+        messages=messages,
+        timeout=timeout,
+    )
+    gateway = LLMGateway(
         {
-            "role": role_map.get(message["role"], "user"),
-            "parts": [{"text": message["content"]}],
+            "deepseek": DeepSeekProvider(
+                api_key=DEEPSEEK_API_KEY,
+                base_url=DEEPSEEK_API_URL,
+            )
         }
-        for message in messages
-    ]
+    )
+    response = await gateway.chat("deepseek", request)
+    return _llm_response_to_legacy_dict(response)
 
 
-def _extract_gemini_text(data: Dict[str, Any]) -> str:
-    """Extract text from a Gemini generateContent response."""
-    candidates = data.get("candidates", [])
-    chunks: List[str] = []
-
-    for candidate in candidates:
-        content = candidate.get("content", {})
-        for part in content.get("parts", []):
-            text = part.get("text")
-            if text:
-                chunks.append(text)
-
-    return "\n".join(chunks).strip()
+def _llm_response_to_legacy_dict(response: LLMResponse) -> Dict[str, Any]:
+    return {
+        "content": response.content,
+        "reasoning_details": response.reasoning,
+    }
 
 
 async def _query_gemini(
@@ -215,24 +156,21 @@ async def _query_gemini(
         print("GEMINI_API_KEY is not configured.")
         return None
 
-    headers = {
-        "x-goog-api-key": GEMINI_API_KEY,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "contents": _messages_to_gemini_contents(messages),
-    }
-    url = f"{GEMINI_API_URL}/models/{model.api_model}:generateContent"
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-
-    data = response.json()
-    return {
-        "content": _extract_gemini_text(data),
-        "reasoning_details": None,
-    }
+    request = LLMRequest(
+        model=model.api_model,
+        messages=messages,
+        timeout=timeout,
+    )
+    gateway = LLMGateway(
+        {
+            "gemini": GeminiProvider(
+                api_key=GEMINI_API_KEY,
+                base_url=GEMINI_API_URL,
+            )
+        }
+    )
+    response = await gateway.chat("gemini", request)
+    return _llm_response_to_legacy_dict(response)
 
 
 async def _query_qwen(
@@ -241,14 +179,25 @@ async def _query_qwen(
     timeout: float,
 ) -> Optional[Dict[str, Any]]:
     """Query Qwen via Alibaba Model Studio's OpenAI-compatible endpoint."""
-    return await _query_openai_compatible_chat(
-        api_key=QWEN_API_KEY,
-        api_url=QWEN_API_URL,
-        api_key_label="QWEN_API_KEY / DASHSCOPE_API_KEY",
-        model=model,
+    if not QWEN_API_KEY:
+        print("QWEN_API_KEY / DASHSCOPE_API_KEY is not configured.")
+        return None
+
+    request = LLMRequest(
+        model=model.api_model,
         messages=messages,
         timeout=timeout,
     )
+    gateway = LLMGateway(
+        {
+            "qwen": QwenProvider(
+                api_key=QWEN_API_KEY,
+                base_url=QWEN_API_URL,
+            )
+        }
+    )
+    response = await gateway.chat("qwen", request)
+    return _llm_response_to_legacy_dict(response)
 
 
 async def _query_kimi(
@@ -257,14 +206,25 @@ async def _query_kimi(
     timeout: float,
 ) -> Optional[Dict[str, Any]]:
     """Query Kimi via the official OpenAI-compatible coding endpoint."""
-    return await _query_openai_compatible_chat(
-        api_key=KIMI_API_KEY,
-        api_url=KIMI_API_URL,
-        api_key_label="KIMI_API_KEY / MOONSHOT_API_KEY",
-        model=model,
+    if not KIMI_API_KEY:
+        print("KIMI_API_KEY / MOONSHOT_API_KEY is not configured.")
+        return None
+
+    request = LLMRequest(
+        model=model.api_model,
         messages=messages,
         timeout=timeout,
     )
+    gateway = LLMGateway(
+        {
+            "kimi": KimiProvider(
+                api_key=KIMI_API_KEY,
+                base_url=KIMI_API_URL,
+            )
+        }
+    )
+    response = await gateway.chat("kimi", request)
+    return _llm_response_to_legacy_dict(response)
 
 
 async def query_model(
