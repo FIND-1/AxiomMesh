@@ -4,6 +4,7 @@ from .base import LLMProvider
 from .deepseek import DeepSeekProvider
 from .gemini import GeminiProvider
 from .kimi import KimiProvider
+from .openai import OpenAIProvider
 from .qwen import QwenProvider
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "GeminiProvider",
     "KimiProvider",
     "LLMProvider",
+    "OpenAIProvider",
     "QwenProvider",
 ]

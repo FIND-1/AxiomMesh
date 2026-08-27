@@ -2,8 +2,6 @@
 
 from typing import Any, Dict, List, Optional, Sequence
 
-import httpx
-
 from .config import (
     CHAIRMAN_MODEL,
     COUNCIL_MODELS,
@@ -26,6 +24,7 @@ from .llm.gateway import LLMGateway
 from .llm.providers.deepseek import DeepSeekProvider
 from .llm.providers.gemini import GeminiProvider
 from .llm.providers.kimi import KimiProvider
+from .llm.providers.openai import OpenAIProvider
 from .llm.providers.qwen import QwenProvider
 
 
@@ -46,42 +45,6 @@ def resolve_model(model: ModelConfig | str) -> ModelConfig:
     raise ValueError(f"Unknown model configuration: {model}")
 
 
-def _messages_to_openai_input(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """Convert chat-style messages into OpenAI Responses API input."""
-    return [
-        {
-            "role": message["role"],
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": message["content"],
-                }
-            ],
-        }
-        for message in messages
-    ]
-
-
-def _extract_openai_text(data: Dict[str, Any]) -> str:
-    """Extract assistant text from an OpenAI Responses API payload."""
-    output_text = data.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
-
-    output = data.get("output", [])
-    chunks: List[str] = []
-
-    for item in output:
-        if item.get("type") != "message":
-            continue
-
-        for content in item.get("content", []):
-            if content.get("type") in {"output_text", "text"}:
-                chunks.append(content.get("text", ""))
-
-    return "\n".join(chunk for chunk in chunks if chunk).strip()
-
-
 async def _query_openai(
     model: ModelConfig,
     messages: List[Dict[str, str]],
@@ -92,24 +55,21 @@ async def _query_openai(
         print("OPENAI_API_KEY is not configured.")
         return None
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model.api_model,
-        "input": _messages_to_openai_input(messages),
-    }
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(OPENAI_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-
-    data = response.json()
-    return {
-        "content": _extract_openai_text(data),
-        "reasoning_details": None,
-    }
+    request = LLMRequest(
+        model=model.api_model,
+        messages=messages,
+        timeout=timeout,
+    )
+    gateway = LLMGateway(
+        {
+            "openai": OpenAIProvider(
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_API_URL,
+            )
+        }
+    )
+    response = await gateway.chat("openai", request)
+    return _llm_response_to_legacy_dict(response)
 
 
 async def _query_deepseek(
