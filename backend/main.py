@@ -13,6 +13,7 @@ import time
 from . import storage
 from .council import (
     build_council_metadata,
+    build_empty_council_results,
     build_evidence_store_from_results,
     generate_conversation_title,
     run_full_council,
@@ -225,15 +226,19 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
 
             if not stage1_results:
-                error_response = {
-                    "model": "error",
-                    "response": "All models failed to respond. Please check your API keys and model configuration."
-                }
-                yield f"data: {json.dumps({'type': 'stage3_complete', 'data': error_response})}\n\n"
+                stage1_results, stage2_results, stage3_result, metadata = build_empty_council_results(agent_events)
+                yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
                 if title_task:
                     title = await title_task
                     storage.update_conversation_title(conversation_id, title)
                     yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}})}\n\n"
+                storage.add_assistant_message(
+                    conversation_id,
+                    stage1_results,
+                    stage2_results,
+                    stage3_result,
+                    metadata,
+                )
                 yield f"data: {json.dumps({'type': 'complete'})}\n\n"
                 return
 
