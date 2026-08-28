@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import httpx
 
@@ -19,7 +19,7 @@ from ..contracts import (
 
 
 def _messages_to_openai_input(
-    messages: List[Mapping[str, Any]],
+    messages: Sequence[Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Convert chat-style messages into OpenAI Responses API input."""
     return [
@@ -36,6 +36,13 @@ def _messages_to_openai_input(
     ]
 
 
+def _openai_refusal_message(content: Mapping[str, Any]) -> str:
+    """Return the refusal text, tolerating refusal items without a message."""
+    refusal = content.get("refusal")
+    if isinstance(refusal, str) and refusal.strip():
+        return refusal
+    return "OpenAI response was refused without a refusal message"
+
 def _raise_if_openai_refusal(data: Mapping[str, Any]) -> None:
     output = data.get("output")
     if not isinstance(output, list):
@@ -51,8 +58,7 @@ def _raise_if_openai_refusal(data: Mapping[str, Any]) -> None:
             if not isinstance(content, Mapping):
                 continue
             if content.get("type") in {"refusal", "output_refusal"}:
-                refusal = validate_response_content(content.get("refusal"))
-                raise LLMRefusalError(refusal)
+                raise LLMRefusalError(_openai_refusal_message(content))
 
 
 def _extract_openai_text(data: Mapping[str, Any]) -> str:
@@ -103,8 +109,7 @@ def _extract_openai_text(data: Mapping[str, Any]) -> str:
                     f"LLM response content item type must be str, got {type(content_type).__name__}"
                 )
             if content_type in {"refusal", "output_refusal"}:
-                refusal = validate_response_content(content.get("refusal"))
-                raise LLMRefusalError(refusal)
+                raise LLMRefusalError(_openai_refusal_message(content))
             if content_type in {"output_text", "text"}:
                 if "text" not in content:
                     raise LLMResponseError("LLM response text content is missing text")

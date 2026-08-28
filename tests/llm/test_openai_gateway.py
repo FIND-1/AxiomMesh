@@ -356,6 +356,48 @@ class OpenAIProviderTest(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
+    async def test_openai_refusal_without_message_still_raises_refusal_error(self):
+        provider = OpenAIProvider(
+            api_key="test-key",
+            base_url="https://openai.test/v1/responses",
+        )
+        cases = {
+            "missing refusal message": {
+                "output": [
+                    {"type": "message", "content": [{"type": "refusal"}]},
+                ]
+            },
+            "blank refusal message": {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "refusal", "refusal": "   "}],
+                    }
+                ]
+            },
+            "non-text refusal message": {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_refusal", "refusal": {"bad": True}}],
+                    }
+                ]
+            },
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                FakeAsyncClient.response = FakeHTTPResponse(payload)
+                with patch("backend.llm.providers.openai.httpx.AsyncClient", FakeAsyncClient):
+                    with self.assertRaises(LLMRefusalError):
+                        await provider.chat(
+                            LLMRequest(
+                                model="gpt-5-nano",
+                                messages=[{"role": "user", "content": "hello"}],
+                                timeout=6.5,
+                            )
+                        )
+
     async def test_openai_invalid_content_raises_response_error(self):
         provider = OpenAIProvider(
             api_key="test-key",
