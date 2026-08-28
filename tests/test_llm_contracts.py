@@ -1,6 +1,12 @@
 import unittest
 
 from backend.llm import LLMError, LLMRequest, LLMResponse, LLMUsage
+from backend.llm.contracts import (
+    LLMRefusalError,
+    LLMResponseError,
+    LLMUnsupportedOutputError,
+    validate_response_content,
+)
 
 
 class LLMContractsTest(unittest.TestCase):
@@ -75,6 +81,23 @@ class LLMContractsTest(unittest.TestCase):
                 "raw_metadata": {"vendor_field": "preserved"},
             },
         )
+
+    def test_validate_response_content_accepts_strings_including_empty(self):
+        self.assertEqual(validate_response_content(""), "")
+        self.assertEqual(validate_response_content("hello"), "hello")
+
+    def test_validate_response_content_rejects_non_strings(self):
+        invalid_contents = [None, {"content": "hello"}, ["hello"], 123]
+
+        for content in invalid_contents:
+            with self.subTest(content=content):
+                with self.assertRaises(LLMResponseError):
+                    validate_response_content(content)
+
+    def test_llm_response_semantic_errors_are_distinct(self):
+        self.assertIsInstance(LLMResponseError("bad schema"), Exception)
+        self.assertIsInstance(LLMUnsupportedOutputError("tool only"), Exception)
+        self.assertIsInstance(LLMRefusalError("refused"), Exception)
 
     def test_llm_error_preserves_provider_context(self):
         error = LLMError(

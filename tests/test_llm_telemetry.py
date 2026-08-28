@@ -3,7 +3,12 @@ from unittest.mock import patch
 
 import httpx
 
-from backend.llm.contracts import LLMUsage
+from backend.llm.contracts import (
+    LLMRefusalError,
+    LLMResponseError,
+    LLMUnsupportedOutputError,
+    LLMUsage,
+)
 from backend.llm.telemetry import LLMExecutionRecord, categorize_llm_error, log_execution_record
 
 
@@ -78,6 +83,9 @@ class LLMTelemetryTest(unittest.TestCase):
         self.assertEqual(categorize_llm_error(make_status_error(401)), "client_error")
         self.assertEqual(categorize_llm_error(ValueError("bad config")), "configuration_error")
         self.assertEqual(categorize_llm_error(TypeError("bad schema")), "schema_error")
+        self.assertEqual(categorize_llm_error(LLMResponseError("bad content")), "schema_error")
+        self.assertEqual(categorize_llm_error(LLMUnsupportedOutputError("tool only")), "unsupported_output")
+        self.assertEqual(categorize_llm_error(LLMRefusalError("refused")), "model_refusal")
 
     def test_log_execution_record_uses_success_and_failure_levels(self):
         success = LLMExecutionRecord(

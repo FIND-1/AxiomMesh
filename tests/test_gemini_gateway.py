@@ -2,7 +2,13 @@ import unittest
 from unittest.mock import patch
 
 from backend import openrouter
-from backend.llm.contracts import LLMRequest, LLMResponse, LLMUsage
+from backend.llm.contracts import (
+    LLMRequest,
+    LLMResponse,
+    LLMResponseError,
+    LLMUnsupportedOutputError,
+    LLMUsage,
+)
 from backend.llm.gateway import LLMGateway
 from backend.llm.providers.gemini import GeminiProvider
 
@@ -21,9 +27,9 @@ class FakeHTTPResponse:
 
 
 class FakeAsyncClient:
-    response = None
-    last_timeout = None
-    last_post = None
+    response: FakeHTTPResponse | None = None
+    last_timeout: float | None = None
+    last_post: dict | None = None
 
     def __init__(self, *, timeout=None):
         self.timeout = timeout
@@ -158,7 +164,128 @@ class GeminiProviderTest(unittest.IsolatedAsyncioTestCase):
                 },
             },
         )
+        assert FakeAsyncClient.last_post is not None
         self.assertNotIn("temperature", FakeAsyncClient.last_post["json"])
+
+    async def test_gemini_empty_content_is_successful(self):
+        FakeAsyncClient.response = FakeHTTPResponse(
+            {"candidates": [{"content": {"parts": [{"text": ""}]}}]}
+        )
+        provider = GeminiProvider(
+            api_key="test-key",
+            base_url="https://gemini.test/v1beta",
+        )
+
+        with patch("backend.llm.providers.gemini.httpx.AsyncClient", FakeAsyncClient):
+            response = await provider.chat(
+                LLMRequest(
+                    model="gemini-3.5-flash-lite",
+                    messages=[{"role": "user", "content": "hello"}],
+                    timeout=7.5,
+                )
+            )
+
+        self.assertEqual(response.content, "")
+
+    async def test_gemini_valid_non_text_only_raises_unsupported_output(self):
+        provider = GeminiProvider(
+            api_key="test-key",
+            base_url="https://gemini.test/v1beta",
+        )
+        cases = {
+            "function call only": {"candidates": [{"content": {"parts": [{"functionCall": {"name": "lookup"}}]}}]},
+            "inline data only": {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "text/plain", "data": "YQ=="}}]}}]},
+            "executable code only": {"candidates": [{"content": {"parts": [{"executableCode": {"language": "PYTHON", "code": "print(1)"}}]}}]},
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                FakeAsyncClient.response = FakeHTTPResponse(payload)
+                with patch("backend.llm.providers.gemini.httpx.AsyncClient", FakeAsyncClient):
+                    with self.assertRaises(LLMUnsupportedOutputError):
+                        await provider.chat(
+                            LLMRequest(
+                                model="gemini-3.5-flash-lite",
+                                messages=[{"role": "user", "content": "hello"}],
+                                timeout=7.5,
+                            )
+                        )
+
+    async def test_gemini_thought_only_text_raises_unsupported_output(self):
+        FakeAsyncClient.response = FakeHTTPResponse(
+            {"candidates": [{"content": {"parts": [{"text": "hidden thought", "thought": True}]}}]}
+        )
+        provider = GeminiProvider(
+            api_key="test-key",
+            base_url="https://gemini.test/v1beta",
+        )
+
+        with patch("backend.llm.providers.gemini.httpx.AsyncClient", FakeAsyncClient):
+            with self.assertRaises(LLMUnsupportedOutputError):
+                await provider.chat(
+                    LLMRequest(
+                        model="gemini-3.5-flash-lite",
+                        messages=[{"role": "user", "content": "hello"}],
+                        timeout=7.5,
+                    )
+                )
+
+    async def test_gemini_thought_and_ordinary_text_consumes_only_ordinary_text(self):
+        FakeAsyncClient.response = FakeHTTPResponse(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": "hidden thought", "thought": True},
+                                {"functionCall": {"name": "lookup"}},
+                                {"text": "ordinary answer"},
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+        provider = GeminiProvider(
+            api_key="test-key",
+            base_url="https://gemini.test/v1beta",
+        )
+
+        with patch("backend.llm.providers.gemini.httpx.AsyncClient", FakeAsyncClient):
+            response = await provider.chat(
+                LLMRequest(
+                    model="gemini-3.5-flash-lite",
+                    messages=[{"role": "user", "content": "hello"}],
+                    timeout=7.5,
+                )
+            )
+
+        self.assertEqual(response.content, "ordinary answer")
+
+    async def test_gemini_invalid_content_raises_response_error(self):
+        provider = GeminiProvider(
+            api_key="test-key",
+            base_url="https://gemini.test/v1beta",
+        )
+        cases = {
+            "none text": {"candidates": [{"content": {"parts": [{"text": None}]}}]},
+            "missing text": {"candidates": [{"content": {"parts": [{}]}}]},
+            "dict text": {"candidates": [{"content": {"parts": [{"text": {"bad": True}}]}}]},
+            "malformed candidates": {"candidates": {"unexpected": True}},
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                FakeAsyncClient.response = FakeHTTPResponse(payload)
+                with patch("backend.llm.providers.gemini.httpx.AsyncClient", FakeAsyncClient):
+                    with self.assertRaises(LLMResponseError):
+                        await provider.chat(
+                            LLMRequest(
+                                model="gemini-3.5-flash-lite",
+                                messages=[{"role": "user", "content": "hello"}],
+                                timeout=7.5,
+                            )
+                        )
 
     async def test_gemini_usage_missing_is_not_fabricated(self):
         FakeAsyncClient.response = FakeHTTPResponse(
@@ -249,6 +376,7 @@ class GeminiLegacyCompatibilityTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(FakeAsyncClient.last_timeout, 12.0)
+        assert FakeAsyncClient.last_post is not None
         self.assertEqual(
             FakeAsyncClient.last_post["url"],
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",

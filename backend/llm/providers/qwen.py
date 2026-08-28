@@ -7,7 +7,13 @@ from typing import Any, Dict, Mapping, Optional
 
 import httpx
 
-from ..contracts import LLMRequest, LLMResponse, LLMUsage
+from ..contracts import (
+    LLMRequest,
+    LLMResponse,
+    LLMResponseError,
+    LLMUsage,
+    validate_response_content,
+)
 
 
 def _usage_value(usage: Mapping[str, Any], key: str) -> Optional[int]:
@@ -86,9 +92,17 @@ class QwenProvider:
         latency_ms = round((perf_counter() - started_at) * 1000, 2)
 
         data = response.json()
+        if not isinstance(data, Mapping):
+            raise LLMResponseError(
+                f"LLM provider response must be object, got {type(data).__name__}"
+            )
         choices = data.get("choices", [])
-        first_choice = choices[0] if choices else {}
-        message = first_choice.get("message", {})
+        first_choice = choices[0] if isinstance(choices, list) and choices else {}
+        message = first_choice.get("message") if isinstance(first_choice, Mapping) else None
+        content = validate_response_content(
+            message.get("content") if isinstance(message, Mapping) else None
+        )
+        reasoning = message.get("reasoning_content") if isinstance(message, Mapping) else None
 
         raw_metadata = {
             key: data[key]
@@ -97,13 +111,17 @@ class QwenProvider:
         }
 
         return LLMResponse(
-            content=message.get("content"),
-            reasoning=message.get("reasoning_content"),
+            content=content,
+            reasoning=reasoning,
             provider=self.provider_name,
             model=request.model,
             usage=_extract_usage(data),
             latency_ms=latency_ms,
-            finish_reason=first_choice.get("finish_reason"),
+            finish_reason=(
+                first_choice.get("finish_reason")
+                if isinstance(first_choice, Mapping)
+                else None
+            ),
             request_id=_request_id_from_headers(response.headers),
             raw_metadata=raw_metadata,
         )

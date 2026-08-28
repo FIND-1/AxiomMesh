@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from backend import openrouter
-from backend.llm.contracts import LLMRequest, LLMResponse, LLMUsage
+from backend.llm.contracts import LLMRequest, LLMResponse, LLMResponseError, LLMUsage
 from backend.llm.gateway import LLMGateway
 from backend.llm.providers.deepseek import DeepSeekProvider
 
@@ -21,9 +21,9 @@ class FakeHTTPResponse:
 
 
 class FakeAsyncClient:
-    response = None
-    last_timeout = None
-    last_post = None
+    response: FakeHTTPResponse | None = None
+    last_timeout: float | None = None
+    last_post: dict | None = None
 
     def __init__(self, *, timeout=None):
         self.timeout = timeout
@@ -139,6 +139,45 @@ class DeepSeekProviderTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_deepseek_empty_content_is_successful(self):
+        FakeAsyncClient.response = FakeHTTPResponse(
+            {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]}
+        )
+        provider = DeepSeekProvider(api_key="test-key", base_url="https://deepseek.test/chat")
+
+        with patch("backend.llm.providers.deepseek.httpx.AsyncClient", FakeAsyncClient):
+            response = await provider.chat(
+                LLMRequest(
+                    model="deepseek-v4-flash",
+                    messages=[{"role": "user", "content": "hello"}],
+                    timeout=9.5,
+                )
+            )
+
+        self.assertEqual(response.content, "")
+
+    async def test_deepseek_invalid_content_raises_response_error(self):
+        provider = DeepSeekProvider(api_key="test-key", base_url="https://deepseek.test/chat")
+        cases = {
+            "none content": {"choices": [{"message": {"content": None}}]},
+            "missing content": {"choices": [{"message": {}}]},
+            "dict content": {"choices": [{"message": {"content": {"text": "bad"}}}]},
+            "malformed choices": {"choices": {"unexpected": True}},
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                FakeAsyncClient.response = FakeHTTPResponse(payload)
+                with patch("backend.llm.providers.deepseek.httpx.AsyncClient", FakeAsyncClient):
+                    with self.assertRaises(LLMResponseError):
+                        await provider.chat(
+                            LLMRequest(
+                                model="deepseek-v4-flash",
+                                messages=[{"role": "user", "content": "hello"}],
+                                timeout=9.5,
+                            )
+                        )
+
     async def test_deepseek_usage_missing_is_not_fabricated(self):
         FakeAsyncClient.response = FakeHTTPResponse(
             {
@@ -225,6 +264,7 @@ class DeepSeekLegacyCompatibilityTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(FakeAsyncClient.last_timeout, 12.0)
+        assert FakeAsyncClient.last_post is not None
         self.assertEqual(FakeAsyncClient.last_post["json"]["model"], "deepseek-v4-flash")
         self.assertEqual(
             FakeAsyncClient.last_post["json"]["messages"],

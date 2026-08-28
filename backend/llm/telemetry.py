@@ -9,7 +9,12 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from .contracts import LLMUsage
+from .contracts import (
+    LLMRefusalError,
+    LLMResponseError,
+    LLMUnsupportedOutputError,
+    LLMUsage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,12 @@ def categorize_llm_error(exc: Exception) -> str:
         return "unknown"
     if isinstance(exc, JSONDecodeError):
         return "parse_error"
+    if isinstance(exc, LLMResponseError):
+        return "schema_error"
+    if isinstance(exc, LLMUnsupportedOutputError):
+        return "unsupported_output"
+    if isinstance(exc, LLMRefusalError):
+        return "model_refusal"
     if isinstance(exc, (TypeError, AttributeError)):
         return "schema_error"
     if isinstance(exc, ValueError):

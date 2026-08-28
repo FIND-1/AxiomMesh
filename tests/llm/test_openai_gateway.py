@@ -2,7 +2,14 @@ import unittest
 from unittest.mock import patch
 
 from backend import openrouter
-from backend.llm.contracts import LLMRequest, LLMResponse, LLMUsage
+from backend.llm.contracts import (
+    LLMRefusalError,
+    LLMRequest,
+    LLMResponse,
+    LLMResponseError,
+    LLMUnsupportedOutputError,
+    LLMUsage,
+)
 from backend.llm.gateway import LLMGateway
 from backend.llm.providers.openai import OpenAIProvider
 
@@ -21,9 +28,9 @@ class FakeHTTPResponse:
 
 
 class FakeAsyncClient:
-    response = None
-    last_timeout = None
-    last_post = None
+    response: FakeHTTPResponse | None = None
+    last_timeout: float | None = None
+    last_post: dict | None = None
 
     def __init__(self, *, timeout=None):
         self.timeout = timeout
@@ -166,6 +173,7 @@ class OpenAIProviderTest(unittest.IsolatedAsyncioTestCase):
                 },
             },
         )
+        assert FakeAsyncClient.last_post is not None
         self.assertNotIn("temperature", FakeAsyncClient.last_post["json"])
 
     async def test_openai_top_level_output_text_takes_precedence(self):
@@ -225,8 +233,17 @@ class OpenAIProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.usage, LLMUsage())
         self.assertIsNone(response.request_id)
 
-    async def test_openai_malformed_output_returns_empty_content(self):
-        FakeAsyncClient.response = FakeHTTPResponse({"output": {"unexpected": True}})
+    async def test_openai_nested_empty_text_is_successful(self):
+        FakeAsyncClient.response = FakeHTTPResponse(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": ""}],
+                    }
+                ]
+            }
+        )
         provider = OpenAIProvider(
             api_key="test-key",
             base_url="https://openai.test/v1/responses",
@@ -242,7 +259,128 @@ class OpenAIProviderTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.content, "")
-        self.assertEqual(response.usage, LLMUsage())
+
+    async def test_openai_text_and_tool_output_consumes_text(self):
+        FakeAsyncClient.response = FakeHTTPResponse(
+            {
+                "output": [
+                    {"type": "function_call", "name": "lookup", "arguments": "{}"},
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "answer text"}],
+                    },
+                ]
+            }
+        )
+        provider = OpenAIProvider(
+            api_key="test-key",
+            base_url="https://openai.test/v1/responses",
+        )
+
+        with patch("backend.llm.providers.openai.httpx.AsyncClient", FakeAsyncClient):
+            response = await provider.chat(
+                LLMRequest(
+                    model="gpt-5-nano",
+                    messages=[{"role": "user", "content": "hello"}],
+                    timeout=6.5,
+                )
+            )
+
+        self.assertEqual(response.content, "answer text")
+
+    async def test_openai_empty_output_text_is_successful(self):
+        FakeAsyncClient.response = FakeHTTPResponse({"output_text": ""})
+        provider = OpenAIProvider(
+            api_key="test-key",
+            base_url="https://openai.test/v1/responses",
+        )
+
+        with patch("backend.llm.providers.openai.httpx.AsyncClient", FakeAsyncClient):
+            response = await provider.chat(
+                LLMRequest(
+                    model="gpt-5-nano",
+                    messages=[{"role": "user", "content": "hello"}],
+                    timeout=6.5,
+                )
+            )
+
+        self.assertEqual(response.content, "")
+
+    async def test_openai_valid_non_text_only_raises_unsupported_output(self):
+        provider = OpenAIProvider(
+            api_key="test-key",
+            base_url="https://openai.test/v1/responses",
+        )
+        cases = {
+            "function only": {"output": [{"type": "function_call", "name": "lookup", "arguments": "{}"}]},
+            "reasoning only": {"output": [{"type": "reasoning", "summary": []}]},
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                FakeAsyncClient.response = FakeHTTPResponse(payload)
+                with patch("backend.llm.providers.openai.httpx.AsyncClient", FakeAsyncClient):
+                    with self.assertRaises(LLMUnsupportedOutputError):
+                        await provider.chat(
+                            LLMRequest(
+                                model="gpt-5-nano",
+                                messages=[{"role": "user", "content": "hello"}],
+                                timeout=6.5,
+                            )
+                        )
+
+    async def test_openai_explicit_refusal_raises_refusal_error(self):
+        FakeAsyncClient.response = FakeHTTPResponse(
+            {
+                "output_text": "I cannot comply.",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "refusal", "refusal": "I cannot comply."}],
+                    }
+                ]
+            }
+        )
+        provider = OpenAIProvider(
+            api_key="test-key",
+            base_url="https://openai.test/v1/responses",
+        )
+
+        with patch("backend.llm.providers.openai.httpx.AsyncClient", FakeAsyncClient):
+            with self.assertRaises(LLMRefusalError):
+                await provider.chat(
+                    LLMRequest(
+                        model="gpt-5-nano",
+                        messages=[{"role": "user", "content": "hello"}],
+                        timeout=6.5,
+                    )
+                )
+
+    async def test_openai_invalid_content_raises_response_error(self):
+        provider = OpenAIProvider(
+            api_key="test-key",
+            base_url="https://openai.test/v1/responses",
+        )
+        cases = {
+            "none output_text": {"output_text": None},
+            "dict output_text": {"output_text": {"bad": True}},
+            "missing text": {"output": [{"type": "message", "content": [{"type": "output_text"}]}]},
+            "list text": {"output": [{"type": "message", "content": [{"type": "output_text", "text": ["bad"]}]}]},
+            "malformed output": {"output": {"unexpected": True}},
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                FakeAsyncClient.response = FakeHTTPResponse(payload)
+                with patch("backend.llm.providers.openai.httpx.AsyncClient", FakeAsyncClient):
+                    with self.assertRaises(LLMResponseError):
+                        await provider.chat(
+                            LLMRequest(
+                                model="gpt-5-nano",
+                                messages=[{"role": "user", "content": "hello"}],
+                                timeout=6.5,
+                            )
+                        )
 
 
 class LLMGatewayOpenAITest(unittest.IsolatedAsyncioTestCase):
@@ -292,6 +430,7 @@ class OpenAILegacyCompatibilityTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(FakeAsyncClient.last_timeout, 12.0)
+        assert FakeAsyncClient.last_post is not None
         self.assertEqual(
             FakeAsyncClient.last_post["url"],
             "https://api.openai.com/v1/responses",

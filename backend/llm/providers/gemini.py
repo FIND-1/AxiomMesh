@@ -3,15 +3,32 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import httpx
 
-from ..contracts import LLMRequest, LLMResponse, LLMUsage
+from ..contracts import (
+    LLMRequest,
+    LLMResponse,
+    LLMResponseError,
+    LLMUnsupportedOutputError,
+    LLMUsage,
+    validate_response_content,
+)
+
+_GEMINI_NON_TEXT_PART_KEYS = {
+    "functionCall",
+    "functionResponse",
+    "inlineData",
+    "fileData",
+    "executableCode",
+    "codeExecutionResult",
+    "toolCall",
+}
 
 
 def _messages_to_gemini_contents(
-    messages: List[Mapping[str, Any]],
+    messages: Sequence[Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Convert chat-style messages into Gemini contents."""
     role_map = {
@@ -32,15 +49,54 @@ def _messages_to_gemini_contents(
 def _extract_gemini_text(data: Mapping[str, Any]) -> str:
     """Extract text from a Gemini generateContent response."""
     candidates = data.get("candidates", [])
+    if not isinstance(candidates, list):
+        raise LLMResponseError(
+            f"LLM response candidates must be list, got {type(candidates).__name__}"
+        )
+
     chunks: List[str] = []
+    saw_text = False
+    saw_unsupported_output = False
 
     for candidate in candidates:
-        content = candidate.get("content", {})
-        for part in content.get("parts", []):
-            text = part.get("text")
+        if not isinstance(candidate, Mapping):
+            raise LLMResponseError(
+                f"LLM response candidate must be object, got {type(candidate).__name__}"
+            )
+        content = candidate.get("content")
+        if not isinstance(content, Mapping):
+            raise LLMResponseError(
+                f"LLM response candidate content must be object, got {type(content).__name__}"
+            )
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            raise LLMResponseError(
+                f"LLM response content parts must be list, got {type(parts).__name__}"
+            )
+        for part in parts:
+            if not isinstance(part, Mapping):
+                raise LLMResponseError(
+                    f"LLM response part must be object, got {type(part).__name__}"
+                )
+            if "text" not in part:
+                if any(key in part for key in _GEMINI_NON_TEXT_PART_KEYS):
+                    saw_unsupported_output = True
+                    continue
+                raise LLMResponseError("LLM response part is missing text")
+            text = validate_response_content(part.get("text"))
+            if part.get("thought") is True:
+                saw_unsupported_output = True
+                continue
+            saw_text = True
             if text:
                 chunks.append(text)
 
+    if not saw_text:
+        if saw_unsupported_output:
+            raise LLMUnsupportedOutputError(
+                "LLM response did not include consumable text output"
+            )
+        raise LLMResponseError("LLM response content must include a text part")
     return "\n".join(chunks).strip()
 
 
@@ -118,8 +174,12 @@ class GeminiProvider:
         latency_ms = round((perf_counter() - started_at) * 1000, 2)
 
         data = response.json()
+        if not isinstance(data, Mapping):
+            raise LLMResponseError(
+                f"LLM provider response must be object, got {type(data).__name__}"
+            )
         candidates = data.get("candidates", [])
-        first_candidate = candidates[0] if candidates else {}
+        first_candidate = candidates[0] if isinstance(candidates, list) and candidates else {}
 
         raw_metadata = {
             key: data[key]
@@ -134,7 +194,11 @@ class GeminiProvider:
             model=request.model,
             usage=_extract_usage(data),
             latency_ms=latency_ms,
-            finish_reason=first_candidate.get("finishReason"),
+            finish_reason=(
+                first_candidate.get("finishReason")
+                if isinstance(first_candidate, Mapping)
+                else None
+            ),
             request_id=_request_id_from_headers(response.headers),
             raw_metadata=raw_metadata,
         )

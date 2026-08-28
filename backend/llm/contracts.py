@@ -6,6 +6,26 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 
+class LLMResponseError(Exception):
+    """Provider returned a response that violates the LLM response contract."""
+
+
+class LLMUnsupportedOutputError(Exception):
+    """Provider returned a valid response with no consumable text output."""
+
+
+class LLMRefusalError(Exception):
+    """Provider explicitly refused to produce the requested response."""
+
+
+def validate_response_content(content: object) -> str:
+    if not isinstance(content, str):
+        raise LLMResponseError(
+            f"LLM response content must be str, got {type(content).__name__}"
+        )
+    return content
+
+
 @dataclass(frozen=True)
 class LLMUsage:
     """Token usage reported by a provider when available."""

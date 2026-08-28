@@ -5,7 +5,13 @@ import httpx
 
 from backend import openrouter
 from backend.llm.aggregation import LLMExecutionCollector
-from backend.llm.contracts import LLMResponse, LLMUsage
+from backend.llm.contracts import (
+    LLMRefusalError,
+    LLMResponse,
+    LLMResponseError,
+    LLMUnsupportedOutputError,
+    LLMUsage,
+)
 from backend.llm.retry import RetryStats
 
 
@@ -50,8 +56,10 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
                 [{"role": "user", "content": "hello"}],
             )
 
+        assert response is not None
         self.assertEqual(response["content"], "ok")
         self.assertEqual(set(response.keys()), {"content", "reasoning_details"})
+        assert mock_query.await_args is not None
         args = mock_query.await_args.args
         self.assertEqual(args[:5], (
             "kimi",
@@ -61,6 +69,7 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
             openrouter.KIMI_API_KEY,
         ))
         self.assertIsInstance(args[5], RetryStats)
+        assert mock_log.call_args is not None
         record = mock_log.call_args.args[0]
         self.assertTrue(record.success)
         self.assertEqual(record.logical_model, "kimi")
@@ -108,7 +117,9 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
                 "reasoning_details": "done",
             },
         )
+        assert response is not None
         self.assertEqual(set(response.keys()), {"content", "reasoning_details"})
+        assert mock_log.call_args is not None
         record = mock_log.call_args.args[0]
         payload = record.to_dict()
         self.assertTrue(record.success)
@@ -129,6 +140,32 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
         )
         for key in ("prompt", "response", "api_key", "authorization", "messages"):
             self.assertNotIn(key, payload)
+
+    async def test_query_model_preserves_empty_content_in_legacy_dict(self):
+        provider = FlakyProvider(
+            [
+                LLMResponse(
+                    content="",
+                    reasoning=None,
+                    provider="openai",
+                    model="gpt-5-nano",
+                )
+            ]
+        )
+
+        with patch("backend.openrouter.OPENAI_API_KEY", "test-key"), patch(
+            "backend.openrouter.get_provider",
+            return_value=provider,
+        ), patch("backend.openrouter.log_execution_record") as mock_log:
+            response = await openrouter.query_model(
+                "openai",
+                [{"role": "user", "content": "hello"}],
+            )
+
+        self.assertEqual(response, {"content": "", "reasoning_details": None})
+        mock_log.assert_called_once()
+        assert mock_log.call_args is not None
+        self.assertTrue(mock_log.call_args.args[0].success)
 
     async def test_query_model_records_correlation_fields(self):
         provider = FlakyProvider(
@@ -153,7 +190,9 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
                 workflow_role="judge",
             )
 
+        assert response is not None
         self.assertEqual(response["content"], "ok")
+        assert mock_log.call_args is not None
         record = mock_log.call_args.args[0]
         self.assertEqual(record.run_id, "run-1")
         self.assertEqual(record.workflow_role, "judge")
@@ -188,6 +227,7 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response, {"content": "ok", "reasoning_details": "kept"})
         mock_log.assert_called_once()
         self.assertEqual(len(collector.records()), 1)
+        assert mock_log.call_args is not None
         self.assertIs(collector.records()[0], mock_log.call_args.args[0])
         self.assertEqual(collector.summary()["confirmed_usage"]["total_tokens"]["known_sum"], 7)
 
@@ -270,6 +310,7 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, 2)
         mock_sleep.assert_awaited_once()
         mock_log.assert_called_once()
+        assert mock_log.call_args is not None
         record = mock_log.call_args.args[0]
         self.assertTrue(record.success)
         self.assertTrue(record.execution_id)
@@ -280,6 +321,79 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(record.latency_ms, 0.0)
         self.assertEqual(record.request_id, "req-retry")
         self.assertEqual(record.usage.total_tokens, 42)
+
+    async def test_query_model_returns_none_for_valid_non_text_output(self):
+        provider = FlakyProvider([LLMUnsupportedOutputError("tool only")])
+
+        with patch("backend.openrouter.OPENAI_API_KEY", "test-key"), patch(
+            "backend.openrouter.get_provider",
+            return_value=provider,
+        ), patch("backend.llm.retry.asyncio.sleep", new=AsyncMock()) as mock_sleep, patch(
+            "backend.openrouter.log_execution_record"
+        ) as mock_log:
+            response = await openrouter.query_model(
+                "openai",
+                [{"role": "user", "content": "hello"}],
+            )
+
+        self.assertIsNone(response)
+        self.assertEqual(provider.calls, 1)
+        mock_sleep.assert_not_awaited()
+        assert mock_log.call_args is not None
+        record = mock_log.call_args.args[0]
+        self.assertFalse(record.success)
+        self.assertEqual(record.attempt_count, 1)
+        self.assertFalse(record.retried)
+        self.assertEqual(record.error_category, "unsupported_output")
+
+    async def test_query_model_returns_none_for_model_refusal(self):
+        provider = FlakyProvider([LLMRefusalError("refused")])
+
+        with patch("backend.openrouter.OPENAI_API_KEY", "test-key"), patch(
+            "backend.openrouter.get_provider",
+            return_value=provider,
+        ), patch("backend.llm.retry.asyncio.sleep", new=AsyncMock()) as mock_sleep, patch(
+            "backend.openrouter.log_execution_record"
+        ) as mock_log:
+            response = await openrouter.query_model(
+                "openai",
+                [{"role": "user", "content": "hello"}],
+            )
+
+        self.assertIsNone(response)
+        self.assertEqual(provider.calls, 1)
+        mock_sleep.assert_not_awaited()
+        assert mock_log.call_args is not None
+        record = mock_log.call_args.args[0]
+        self.assertFalse(record.success)
+        self.assertEqual(record.attempt_count, 1)
+        self.assertFalse(record.retried)
+        self.assertEqual(record.error_category, "model_refusal")
+
+    async def test_query_model_returns_none_for_response_contract_failure(self):
+        provider = FlakyProvider([LLMResponseError("bad content")])
+
+        with patch("backend.openrouter.OPENAI_API_KEY", "test-key"), patch(
+            "backend.openrouter.get_provider",
+            return_value=provider,
+        ), patch("backend.llm.retry.asyncio.sleep", new=AsyncMock()) as mock_sleep, patch(
+            "backend.openrouter.log_execution_record"
+        ) as mock_log:
+            response = await openrouter.query_model(
+                "openai",
+                [{"role": "user", "content": "hello"}],
+            )
+
+        self.assertIsNone(response)
+        self.assertEqual(provider.calls, 1)
+        mock_sleep.assert_not_awaited()
+        assert mock_log.call_args is not None
+        record = mock_log.call_args.args[0]
+        self.assertFalse(record.success)
+        self.assertEqual(record.attempt_count, 1)
+        self.assertFalse(record.retried)
+        self.assertEqual(record.error_category, "schema_error")
+        self.assertIsNone(record.http_status)
 
     async def test_query_model_returns_none_after_retry_exhausted(self):
         provider = FlakyProvider(
@@ -303,6 +417,7 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response)
         self.assertEqual(provider.calls, 2)
         mock_sleep.assert_awaited_once()
+        assert mock_log.call_args is not None
         record = mock_log.call_args.args[0]
         self.assertFalse(record.success)
         self.assertEqual(record.attempt_count, 2)
@@ -326,6 +441,7 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(response)
         self.assertEqual(provider.calls, 1)
+        assert mock_log.call_args is not None
         record = mock_log.call_args.args[0]
         self.assertFalse(record.success)
         self.assertEqual(record.attempt_count, 1)
@@ -346,6 +462,7 @@ class OpenRouterDispatchTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIsNone(response)
+        assert mock_log.call_args is not None
         record = mock_log.call_args.args[0]
         self.assertFalse(record.success)
         self.assertEqual(record.attempt_count, 0)

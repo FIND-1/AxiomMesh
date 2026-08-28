@@ -7,7 +7,15 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import httpx
 
-from ..contracts import LLMRequest, LLMResponse, LLMUsage
+from ..contracts import (
+    LLMRefusalError,
+    LLMRequest,
+    LLMResponse,
+    LLMResponseError,
+    LLMUnsupportedOutputError,
+    LLMUsage,
+    validate_response_content,
+)
 
 
 def _messages_to_openai_input(
@@ -28,33 +36,91 @@ def _messages_to_openai_input(
     ]
 
 
+def _raise_if_openai_refusal(data: Mapping[str, Any]) -> None:
+    output = data.get("output")
+    if not isinstance(output, list):
+        return
+
+    for item in output:
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            continue
+        content_items = item.get("content")
+        if not isinstance(content_items, list):
+            continue
+        for content in content_items:
+            if not isinstance(content, Mapping):
+                continue
+            if content.get("type") in {"refusal", "output_refusal"}:
+                refusal = validate_response_content(content.get("refusal"))
+                raise LLMRefusalError(refusal)
+
+
 def _extract_openai_text(data: Mapping[str, Any]) -> str:
     """Extract assistant text from an OpenAI Responses API payload."""
-    output_text = data.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
+    _raise_if_openai_refusal(data)
+
+    if "output_text" in data:
+        return validate_response_content(data.get("output_text")).strip()
 
     output = data.get("output", [])
     if not isinstance(output, list):
-        return ""
+        raise LLMResponseError(
+            f"LLM response output must be list, got {type(output).__name__}"
+        )
 
     chunks: List[str] = []
+    saw_text = False
+    saw_unsupported_output = False
     for item in output:
-        if not isinstance(item, Mapping) or item.get("type") != "message":
+        if not isinstance(item, Mapping):
+            raise LLMResponseError(
+                f"LLM response output item must be object, got {type(item).__name__}"
+            )
+
+        item_type = item.get("type")
+        if not isinstance(item_type, str):
+            raise LLMResponseError(
+                f"LLM response output item type must be str, got {type(item_type).__name__}"
+            )
+        if item_type != "message":
+            saw_unsupported_output = True
             continue
 
         content_items = item.get("content", [])
         if not isinstance(content_items, list):
-            continue
+            raise LLMResponseError(
+                f"LLM response message content must be list, got {type(content_items).__name__}"
+            )
 
         for content in content_items:
             if not isinstance(content, Mapping):
-                continue
-            if content.get("type") in {"output_text", "text"}:
-                text = content.get("text")
+                raise LLMResponseError(
+                    f"LLM response content item must be object, got {type(content).__name__}"
+                )
+            content_type = content.get("type")
+            if not isinstance(content_type, str):
+                raise LLMResponseError(
+                    f"LLM response content item type must be str, got {type(content_type).__name__}"
+                )
+            if content_type in {"refusal", "output_refusal"}:
+                refusal = validate_response_content(content.get("refusal"))
+                raise LLMRefusalError(refusal)
+            if content_type in {"output_text", "text"}:
+                if "text" not in content:
+                    raise LLMResponseError("LLM response text content is missing text")
+                text = validate_response_content(content.get("text"))
+                saw_text = True
                 if text:
-                    chunks.append(str(text))
+                    chunks.append(text)
+                continue
+            saw_unsupported_output = True
 
+    if not saw_text:
+        if saw_unsupported_output:
+            raise LLMUnsupportedOutputError(
+                "LLM response did not include consumable text output"
+            )
+        raise LLMResponseError("LLM response content must include output text")
     return "\n".join(chunks).strip()
 
 
@@ -135,6 +201,10 @@ class OpenAIProvider:
         latency_ms = round((perf_counter() - started_at) * 1000, 2)
 
         data = response.json()
+        if not isinstance(data, Mapping):
+            raise LLMResponseError(
+                f"LLM provider response must be object, got {type(data).__name__}"
+            )
         raw_metadata = {
             key: data[key]
             for key in ("id", "object", "created_at", "status")
