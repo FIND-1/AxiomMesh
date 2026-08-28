@@ -21,6 +21,7 @@ from .council import (
     stage3_synthesize_final,
 )
 from .incident_input import parse_incident_input
+from .llm.aggregation import LLMExecutionCollector, log_llm_run_summary
 
 app = FastAPI(title="Agent Council API")
 
@@ -107,37 +108,48 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
 
     # Check if this is the first message
     is_first_message = len(conversation["messages"]) == 0
+    council_run_id = str(uuid.uuid4())
+    execution_collector = LLMExecutionCollector(council_run_id)
 
-    # Add user message
-    storage.add_user_message(conversation_id, request.content)
+    try:
+        # Add user message
+        storage.add_user_message(conversation_id, request.content)
 
-    # If this is the first message, generate a title
-    if is_first_message:
-        title = await generate_conversation_title(request.content)
-        storage.update_conversation_title(conversation_id, title)
+        # If this is the first message, generate a title
+        if is_first_message:
+            title = await generate_conversation_title(
+                request.content,
+                run_id=council_run_id,
+                execution_collector=execution_collector,
+            )
+            storage.update_conversation_title(conversation_id, title)
 
-    # Run the 3-stage council process
-    stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
-        request.content,
-        request.logs,
-    )
+        # Run the 3-stage council process
+        stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
+            request.content,
+            request.logs,
+            run_id=council_run_id,
+            execution_collector=execution_collector,
+        )
 
-    # Add assistant message with all stages
-    storage.add_assistant_message(
-        conversation_id,
-        stage1_results,
-        stage2_results,
-        stage3_result,
-        metadata,
-    )
+        # Add assistant message with all stages
+        storage.add_assistant_message(
+            conversation_id,
+            stage1_results,
+            stage2_results,
+            stage3_result,
+            metadata,
+        )
 
-    # Return the complete response with metadata
-    return {
-        "stage1": stage1_results,
-        "stage2": stage2_results,
-        "stage3": stage3_result,
-        "metadata": metadata
-    }
+        # Return the complete response with metadata
+        return {
+            "stage1": stage1_results,
+            "stage2": stage2_results,
+            "stage3": stage3_result,
+            "metadata": metadata
+        }
+    finally:
+        log_llm_run_summary(execution_collector.summary())
 
 
 @app.post("/api/conversations/{conversation_id}/message/stream")
@@ -153,6 +165,8 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
 
     # Check if this is the first message
     is_first_message = len(conversation["messages"]) == 0
+    council_run_id = str(uuid.uuid4())
+    execution_collector = LLMExecutionCollector(council_run_id)
 
     async def event_generator():
         try:
@@ -186,7 +200,13 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             # Start title generation in parallel (don't await yet)
             title_task = None
             if is_first_message:
-                title_task = asyncio.create_task(generate_conversation_title(request.content))
+                title_task = asyncio.create_task(
+                    generate_conversation_title(
+                        request.content,
+                        run_id=council_run_id,
+                        execution_collector=execution_collector,
+                    )
+                )
 
             # Stage 1: Collect responses
             yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
@@ -195,6 +215,8 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                     request.content,
                     incident_input,
                     event_sink=queue_agent_event,
+                    run_id=council_run_id,
+                    execution_collector=execution_collector,
                 )
             )
             async for event in forward_agent_events_while(stage1_task):
@@ -224,6 +246,8 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                     stage1_results,
                     event_sink=queue_agent_event,
                     evidence_store=evidence_store,
+                    run_id=council_run_id,
+                    execution_collector=execution_collector,
                 )
             )
             async for event in forward_agent_events_while(stage2_task):
@@ -246,6 +270,8 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                     stage1_results,
                     stage2_results,
                     event_sink=queue_agent_event,
+                    run_id=council_run_id,
+                    execution_collector=execution_collector,
                 )
             )
             async for event in forward_agent_events_while(stage3_task):
@@ -281,6 +307,8 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
         except Exception as e:
             # Send error event
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        finally:
+            log_llm_run_summary(execution_collector.summary())
 
     return StreamingResponse(
         event_generator(),

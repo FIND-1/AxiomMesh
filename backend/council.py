@@ -8,6 +8,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
+from uuid import uuid4
 
 from .agent_models import AgentEvent, AgentMessage, AgentResult, AgentResultPayload, Evidence
 from .config import CHAIRMAN_MODEL, COUNCIL_MODELS, TITLE_MODEL, ModelConfig
@@ -26,6 +27,7 @@ from .investigation_tools import (
     investigation_tool_catalog,
     run_investigation_tools,
 )
+from .llm.aggregation import LLMExecutionCollector, log_llm_run_summary
 from .openrouter import query_model
 
 
@@ -1213,6 +1215,8 @@ async def _run_specialist_agent(
     model: ModelConfig,
     incident_input: IncidentInput,
     event_sink: Optional[AgentEventSink] = None,
+    run_id: Optional[str] = None,
+    execution_collector: Optional[LLMExecutionCollector] = None,
 ) -> Optional[AgentResultPayload]:
     await _emit_agent_event(
         event_sink,
@@ -1240,7 +1244,13 @@ async def _run_specialist_agent(
         )
 
     prompt = _build_specialist_prompt(blueprint, incident_input, tool_results)
-    response = await query_model(model, [{"role": "user", "content": prompt}])
+    response = await query_model(
+        model,
+        [{"role": "user", "content": prompt}],
+        run_id=run_id,
+        workflow_role="specialist",
+        execution_collector=execution_collector,
+    )
     if response is None:
         await _emit_agent_event(
             event_sink,
@@ -1305,6 +1315,8 @@ async def stage1_collect_responses(
     user_query: str,
     incident_input: Optional[IncidentInput] = None,
     event_sink: Optional[AgentEventSink] = None,
+    run_id: Optional[str] = None,
+    execution_collector: Optional[LLMExecutionCollector] = None,
 ) -> List[AgentResultPayload]:
     """
     Stage 1: Run specialist agent roles in parallel.
@@ -1316,9 +1328,17 @@ async def stage1_collect_responses(
         List of structured specialist results
     """
     parsed_input = incident_input or parse_incident_input(user_query)
+    stage_run_id = run_id or str(uuid4())
     assignments = _specialist_assignments()
     tasks = [
-        _run_specialist_agent(blueprint, model, parsed_input, event_sink)
+        _run_specialist_agent(
+            blueprint,
+            model,
+            parsed_input,
+            event_sink,
+            run_id=stage_run_id,
+            execution_collector=execution_collector,
+        )
         for blueprint, model in assignments
     ]
     responses = await asyncio.gather(*tasks)
@@ -1331,6 +1351,8 @@ async def stage2_judge_deliberation(
     event_sink: Optional[AgentEventSink] = None,
     evidence_store: Optional[EvidenceStore] = None,
     event_store: Optional[EventStore] = None,
+    run_id: Optional[str] = None,
+    execution_collector: Optional[LLMExecutionCollector] = None,
 ) -> AgentResultPayload:
     """
     Stage 2: Judge evaluates specialist outputs and produces a scorecard.
@@ -1357,9 +1379,16 @@ async def stage2_judge_deliberation(
     prompt = _build_judge_prompt(user_query, stage1_results, evidence_items, evidence_ranking)
     response: Optional[Dict[str, Any]] = None
     judge_model = CHAIRMAN_MODEL
+    stage_run_id = run_id or str(uuid4())
 
     for candidate in _judge_fallback_models(stage1_results):
-        response = await query_model(candidate, [{"role": "user", "content": prompt}])
+        response = await query_model(
+            candidate,
+            [{"role": "user", "content": prompt}],
+            run_id=stage_run_id,
+            workflow_role="judge",
+            execution_collector=execution_collector,
+        )
         if response is not None:
             judge_model = candidate
             break
@@ -1456,6 +1485,8 @@ async def stage3_synthesize_final(
     stage1_results: List[AgentResultPayload],
     stage2_result: AgentResultPayload,
     event_sink: Optional[AgentEventSink] = None,
+    run_id: Optional[str] = None,
+    execution_collector: Optional[LLMExecutionCollector] = None,
 ) -> AgentResultPayload:
     """
     Stage 3: Produce the final decision memo for the council.
@@ -1476,7 +1507,13 @@ async def stage3_synthesize_final(
         metadata={"model": CHAIRMAN_MODEL.id},
     )
     prompt = _build_final_decision_prompt(user_query, stage1_results, stage2_result)
-    response = await query_model(CHAIRMAN_MODEL, [{"role": "user", "content": prompt}])
+    response = await query_model(
+        CHAIRMAN_MODEL,
+        [{"role": "user", "content": prompt}],
+        run_id=run_id or str(uuid4()),
+        workflow_role="final",
+        execution_collector=execution_collector,
+    )
 
     if response is None:
         final_response = _fallback_final_response(stage2_result)
@@ -1542,7 +1579,11 @@ async def stage3_synthesize_final(
     return result
 
 
-async def generate_conversation_title(user_query: str) -> str:
+async def generate_conversation_title(
+    user_query: str,
+    run_id: Optional[str] = None,
+    execution_collector: Optional[LLMExecutionCollector] = None,
+) -> str:
     """
     Generate a short title for a conversation based on the first user message.
 
@@ -1561,7 +1602,14 @@ Question: {user_query}
 Title:"""
 
     messages = [{"role": "user", "content": title_prompt}]
-    response = await query_model(TITLE_MODEL, messages, timeout=30.0)
+    response = await query_model(
+        TITLE_MODEL,
+        messages,
+        timeout=30.0,
+        run_id=run_id,
+        workflow_role="title",
+        execution_collector=execution_collector,
+    )
 
     if response is None:
         return fallback_title
@@ -1657,6 +1705,8 @@ def build_council_metadata(
 async def run_full_council(
     user_query: str,
     structured_logs: Optional[Dict[str, str]] = None,
+    run_id: Optional[str] = None,
+    execution_collector: Optional[LLMExecutionCollector] = None,
 ) -> Tuple[List[AgentResultPayload], AgentResultPayload, AgentResultPayload, Dict[str, Any]]:
     """
     Run the complete 3-stage council process.
@@ -1667,6 +1717,9 @@ async def run_full_council(
     Returns:
         Tuple of (stage1_results, stage2_result, stage3_result, metadata)
     """
+    council_run_id = run_id or str(uuid4())
+    owns_collector = execution_collector is None
+    collector = execution_collector or LLMExecutionCollector(council_run_id)
     incident_input = parse_incident_input(user_query, structured_logs)
     agent_events: List[Dict[str, Any]] = []
 
@@ -1677,6 +1730,8 @@ async def run_full_council(
         user_query,
         incident_input,
         event_sink=collect_event,
+        run_id=council_run_id,
+        execution_collector=collector,
     )
 
     if not stage1_results:
@@ -1711,6 +1766,8 @@ async def run_full_council(
             },
         )
         empty_stage3_result["decision_summary"] = "No decision available."
+        if owns_collector:
+            log_llm_run_summary(collector.summary())
         return [], empty_stage2_result, empty_stage3_result, {"agent_events": agent_events}
 
     evidence_store = build_evidence_store_from_results(stage1_results)
@@ -1719,12 +1776,16 @@ async def run_full_council(
         stage1_results,
         event_sink=collect_event,
         evidence_store=evidence_store,
+        run_id=council_run_id,
+        execution_collector=collector,
     )
     stage3_result = await stage3_synthesize_final(
         user_query,
         stage1_results,
         stage2_result,
         event_sink=collect_event,
+        run_id=council_run_id,
+        execution_collector=collector,
     )
     metadata = build_council_metadata(
         stage1_results,
@@ -1733,4 +1794,6 @@ async def run_full_council(
         agent_events,
         evidence_store,
     )
+    if owns_collector:
+        log_llm_run_summary(collector.summary())
     return stage1_results, stage2_result, stage3_result, metadata

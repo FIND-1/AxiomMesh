@@ -1,20 +1,14 @@
 """Configuration for the LLM Council."""
 
-from dataclasses import dataclass
 import os
 
 from dotenv import load_dotenv
 
+from .llm.registry import ModelSpec, list_models_by_name, resolve_model
+
 load_dotenv()
 
-
-@dataclass(frozen=True)
-class ModelConfig:
-    """A single LLM configuration entry."""
-
-    id: str
-    provider: str
-    api_model: str
+ModelConfig = ModelSpec
 
 
 # Backward-compatible fallback: the existing .env uses OPENROUTER_API_KEY for
@@ -44,49 +38,23 @@ QWEN_API_URL = os.getenv(
     ),
 )
 
-MODEL_REGISTRY = {
-    "openai": ModelConfig(
-        id="openai/gpt-5-nano",
-        provider="openai",
-        api_model="gpt-5-nano",
-    ),
-    "deepseek": ModelConfig(
-        id="deepseek/deepseek-v4-flash",
-        provider="deepseek",
-        api_model="deepseek-v4-flash",
-    ),
-    "gemini": ModelConfig(
-        id="google/gemini-3.5-flash-lite",
-        provider="gemini",
-        api_model="gemini-3.5-flash-lite",
-    ),
-    "kimi": ModelConfig(
-        id="moonshot/kimi-k2.7-code",
-        provider="kimi",
-        api_model="kimi-for-coding",
-    ),
-    "qwen": ModelConfig(
-        id="qwen/qwen3-235b-a22b-instruct-2507",
-        provider="qwen",
-        api_model="qwen3-235b-a22b-instruct-2507",
-    ),
-}
+MODEL_REGISTRY = list_models_by_name()
 
 # Council members.
 COUNCIL_MODELS = [
-    MODEL_REGISTRY["deepseek"],
-    MODEL_REGISTRY["kimi"],
-    MODEL_REGISTRY["gemini"],
-    MODEL_REGISTRY["qwen"],
+    resolve_model("deepseek"),
+    resolve_model("kimi"),
+    resolve_model("gemini"),
+    resolve_model("qwen"),
 ]
 
 # GPT is kept in the registry, but disabled from the active council for now.
 
 # Chairman model - synthesizes final response
-CHAIRMAN_MODEL = MODEL_REGISTRY["gemini"]
+CHAIRMAN_MODEL = resolve_model("gemini")
 
 # Reuse a fast default model for title generation.
-TITLE_MODEL = MODEL_REGISTRY["gemini"]
+TITLE_MODEL = resolve_model("gemini")
 
 # Data directory for conversation storage
 DATA_DIR = "data/conversations"

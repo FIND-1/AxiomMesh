@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class LLMRequest:
     """Provider-neutral chat request."""
 
     model: str
-    messages: List[Mapping[str, Any]]
+    messages: Sequence[Mapping[str, Any]]
     temperature: Optional[float] = None
     timeout: Optional[float] = None
 
