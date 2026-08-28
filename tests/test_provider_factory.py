@@ -1,4 +1,5 @@
 import unittest
+from typing import cast
 from unittest.mock import patch
 
 from backend.llm.provider_factory import get_provider
@@ -24,10 +25,19 @@ class ProviderFactoryTest(unittest.TestCase):
                 f"backend.config.{base_url_attr}", base_url
             ):
                 provider = get_provider(provider_name)
+                assert isinstance(provider, expected_type)
+                configured = cast(
+                    OpenAIProvider
+                    | DeepSeekProvider
+                    | GeminiProvider
+                    | QwenProvider
+                    | KimiProvider,
+                    provider,
+                )
 
                 self.assertIsInstance(provider, expected_type)
-                self.assertEqual(provider.api_key, api_key)
-                self.assertEqual(provider.base_url, base_url)
+                self.assertEqual(configured.api_key, api_key)
+                self.assertEqual(configured.base_url, base_url)
 
     def test_get_provider_raises_for_unknown_provider(self):
         with self.assertRaisesRegex(ValueError, "Unsupported provider: unknown"):

@@ -1,41 +1,46 @@
 import json
 import unittest
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 from backend import council
+from backend.agent_models import AgentResultPayload
 from backend.event_store import EventStore
 from backend.evidence_store import EvidenceStore
 
 
-def _stage_result_with_evidence() -> dict:
-    return {
-        "agent_role": "analysis",
-        "agent_name": "Analysis Agent",
-        "agent_instance_id": "analysis:test/model",
-        "model": "test/model",
-        "response": "analysis",
-        "structured_output": {},
-        "evidence": [
-            {
-                "id": "ev001",
-                "type": "FACT",
-                "content": "error.log shows database timeout",
-                "source": "error.log",
-                "agent_role": "analysis",
-                "confidence": 0.9,
-                "need_validation": False,
-            },
-            {
-                "id": "ev002",
-                "type": "FACT",
-                "content": "metrics show latency spike",
-                "source": "metrics",
-                "agent_role": "analysis",
-                "confidence": 0.8,
-                "need_validation": False,
-            },
-        ],
-    }
+def _stage_result_with_evidence() -> AgentResultPayload:
+    return cast(
+        AgentResultPayload,
+        {
+            "agent_role": "analysis",
+            "agent_name": "Analysis Agent",
+            "agent_instance_id": "analysis:test/model",
+            "model": "test/model",
+            "response": "analysis",
+            "structured_output": {},
+            "evidence": [
+                {
+                    "id": "ev001",
+                    "type": "FACT",
+                    "content": "error.log shows database timeout",
+                    "source": "error.log",
+                    "agent_role": "analysis",
+                    "confidence": 0.9,
+                    "need_validation": False,
+                },
+                {
+                    "id": "ev002",
+                    "type": "FACT",
+                    "content": "metrics show latency spike",
+                    "source": "metrics",
+                    "agent_role": "analysis",
+                    "confidence": 0.8,
+                    "need_validation": False,
+                },
+            ],
+        },
+    )
 
 
 class EvidenceUsedByJudgeEventTest(unittest.IsolatedAsyncioTestCase):

@@ -16,6 +16,7 @@ class StorageConversationReuseTest(unittest.TestCase):
 
                 reusable = storage.get_reusable_empty_conversation()
 
+        assert reusable is not None
         self.assertEqual(reusable["id"], second["id"])
         self.assertEqual(len(first["messages"]), 0)
 

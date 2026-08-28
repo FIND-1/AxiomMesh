@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import FrozenInstanceError
+from typing import Any, Dict, cast
 from unittest.mock import ANY, AsyncMock, patch
 
 from backend import openrouter
@@ -36,7 +37,7 @@ class ModelRegistryTest(unittest.TestCase):
 
     def test_registry_exports_are_read_only(self):
         with self.assertRaises(TypeError):
-            list_models_by_name()["new"] = ModelSpec(
+            cast(Dict[str, ModelSpec], list_models_by_name())["new"] = ModelSpec(
                 name="new",
                 id="new/model",
                 provider="new",
@@ -49,7 +50,7 @@ class ModelRegistryTest(unittest.TestCase):
         model = resolve_model("gemini")
 
         with self.assertRaises(FrozenInstanceError):
-            model.provider = "openai"
+            cast(Any, model).provider = "openai"
 
     def test_list_models_returns_immutable_snapshot(self):
         models = list_models()
@@ -87,7 +88,9 @@ class OpenRouterRegistryCompatibilityTest(unittest.IsolatedAsyncioTestCase):
                 [{"role": "user", "content": "hello"}],
             )
 
+        assert response is not None
         self.assertEqual(response["content"], "ok")
+        assert mock_query.await_args is not None
         args = mock_query.await_args.args
         self.assertEqual(args[:5], (
             "kimi",

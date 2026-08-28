@@ -1,7 +1,9 @@
 import unittest
+from typing import List, cast
 from unittest.mock import AsyncMock, patch
 
 from backend import council
+from backend.agent_models import AgentResultPayload
 from backend.llm.aggregation import LLMExecutionCollector
 from backend.llm.contracts import LLMUsage
 from backend.llm.telemetry import LLMExecutionRecord
@@ -120,6 +122,7 @@ class CouncilFlowTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(title, "订单接口 500 错误排查")
+        assert mock_query.await_args is not None
         self.assertEqual(mock_query.await_args.kwargs["run_id"], "run-title")
         self.assertEqual(mock_query.await_args.kwargs["workflow_role"], "title")
 
@@ -167,25 +170,28 @@ class CouncilFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_stage2_judge_candidates_share_run_correlation(self):
-        stage1_results = [
-            {
-                "agent_role": "analysis",
-                "agent_name": "Analysis Agent",
-                "model": council.COUNCIL_MODELS[0].id,
-                "response": "Analysis response",
-                "structured_output": {
-                    "summary": "Cache errors increased",
-                    "facts": ["cache timeout"],
-                    "findings": [],
+        stage1_results = cast(
+            List[AgentResultPayload],
+            [
+                {
+                    "agent_role": "analysis",
+                    "agent_name": "Analysis Agent",
+                    "model": council.COUNCIL_MODELS[0].id,
+                    "response": "Analysis response",
+                    "structured_output": {
+                        "summary": "Cache errors increased",
+                        "facts": ["cache timeout"],
+                        "findings": [],
+                        "evidence": [],
+                        "hypotheses": [],
+                        "unknowns": [],
+                        "confidence": 0.7,
+                    },
+                    "messages": [],
                     "evidence": [],
-                    "hypotheses": [],
-                    "unknowns": [],
-                    "confidence": 0.7,
-                },
-                "messages": [],
-                "evidence": [],
-            }
-        ]
+                }
+            ],
+        )
         judge_response = {
             "content": (
                 '{"verdict_summary":"Cache timeout confirmed.",'
